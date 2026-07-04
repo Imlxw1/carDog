@@ -655,51 +655,99 @@ void DogControl::UartTaskLoop()
         return;
     }
 
-    ESP_LOGI(TAG, "===== UART串口控制任务启动 (UART1, 9600bps, TX=断开, RX=GPIO0) =====");
+    ESP_LOGI(TAG, "===== BLE串口控制任务启动 (UART1, BT24, 9600bps, TX=断开, RX=GPIO0) =====");
 
-    const int SPEED = 25;  // 电机速度 (0~100)
-    uint8_t data;
+    // STM32原版速度映射: 6000→60%, 6500→65%, 7000→70% (MotorSetSpeed范围-100~100)
+    const int FORWARD_SPEED = 60;
+    const int TURN_SPEED    = 50;
+    const int SPIN_SPEED    = 70;
+
+    uint8_t rxd_buf[16] = {0};
+    int car_state = 0;
+    int last_car_state = -1;
 
     while (true) {
-        int len = uart_read_bytes(UART_NUM_1, &data, 1, pdMS_TO_TICKS(100));
+        int len = uart_read_bytes(UART_NUM_1, rxd_buf, sizeof(rxd_buf) - 1, pdMS_TO_TICKS(100));
         if (len > 0) {
-            switch (data) {
-                case 0x40:  // 前进
-                    ESP_LOGI(TAG, "前进");
-                    MotorSetSpeed(0, SPEED);
-                    MotorSetSpeed(1, SPEED);
-                    MotorSetSpeed(2, SPEED);
-                    MotorSetSpeed(3, SPEED);
-                    break;
+            rxd_buf[len] = '\0';
 
-                case 0x41:  // 后退
-                    ESP_LOGI(TAG, "后退");
-                    MotorSetSpeed(0, -SPEED);
-                    MotorSetSpeed(1, -SPEED);
-                    MotorSetSpeed(2, -SPEED);
-                    MotorSetSpeed(3, -SPEED);
-                    break;
+            // 解析 rxd_buf[0] — 主方向指令 (同STM32 Data_Analyse)
+            if (len >= 1) {
+                switch (rxd_buf[0]) {
+                    case '1': car_state = 1; break;  // 前进
+                    case '2': car_state = 2; break;  // 后退
+                    case '3': car_state = 3; break;  // 左平移
+                    case '4': car_state = 4; break;  // 右平移
+                    case '0': car_state = 0; break;  // 停止
+                    default: break;
+                }
+            }
+            // 解析 rxd_buf[2] — 旋转指令 (覆盖主方向, 同STM32)
+            if (len >= 3) {
+                switch (rxd_buf[2]) {
+                    case '1': car_state = 5; break;  // 左旋转
+                    case '2': car_state = 6; break;  // 右旋转
+                    default: break;
+                }
+            }
 
-                case 0x42:  // 左平移
-                    ESP_LOGI(TAG, "左平移");
-                    MotorSetSpeed(0, -SPEED);
-                    MotorSetSpeed(1, SPEED);
-                    MotorSetSpeed(2, SPEED);
-                    MotorSetSpeed(3, -SPEED);
-                    break;
+            // 状态变化时才更新电机，避免重复发送LEDC占空比
+            if (car_state != last_car_state) {
+                last_car_state = car_state;
+                switch (car_state) {
+                    case 0:  // 停止
+                        ESP_LOGI(TAG, "BLE → 停止");
+                        MotorStop();
+                        break;
 
-                case 0x43:  // 右平移
-                    ESP_LOGI(TAG, "右平移");
-                    MotorSetSpeed(0, SPEED);
-                    MotorSetSpeed(1, -SPEED);
-                    MotorSetSpeed(2, -SPEED);
-                    MotorSetSpeed(3, SPEED);
-                    break;
+                    case 1:  // 前进
+                        ESP_LOGI(TAG, "BLE → 前进");
+                        MotorSetSpeed(0,  FORWARD_SPEED);
+                        MotorSetSpeed(1,  FORWARD_SPEED);
+                        MotorSetSpeed(2,  FORWARD_SPEED);
+                        MotorSetSpeed(3,  FORWARD_SPEED);
+                        break;
 
-                default:    // 停止
-                    ESP_LOGI(TAG, "停止 (0x%02X)", data);
-                    MotorStop();
-                    break;
+                    case 2:  // 后退
+                        ESP_LOGI(TAG, "BLE → 后退");
+                        MotorSetSpeed(0, -FORWARD_SPEED);
+                        MotorSetSpeed(1, -FORWARD_SPEED);
+                        MotorSetSpeed(2, -FORWARD_SPEED);
+                        MotorSetSpeed(3, -FORWARD_SPEED);
+                        break;
+
+                    case 3:  // 左平移 (麦克纳姆轮: 左轮后转, 右轮前转)
+                        ESP_LOGI(TAG, "BLE → 左平移");
+                        MotorSetSpeed(0, -TURN_SPEED);
+                        MotorSetSpeed(1,  TURN_SPEED);
+                        MotorSetSpeed(2,  TURN_SPEED);
+                        MotorSetSpeed(3, -TURN_SPEED);
+                        break;
+
+                    case 4:  // 右平移 (麦克纳姆轮: 左轮前转, 右轮后转)
+                        ESP_LOGI(TAG, "BLE → 右平移");
+                        MotorSetSpeed(0,  TURN_SPEED);
+                        MotorSetSpeed(1, -TURN_SPEED);
+                        MotorSetSpeed(2, -TURN_SPEED);
+                        MotorSetSpeed(3,  TURN_SPEED);
+                        break;
+
+                    case 5:  // 左旋转 (左轮后转, 右轮前转)
+                        ESP_LOGI(TAG, "BLE → 左旋转");
+                        MotorSetSpeed(0, -SPIN_SPEED);
+                        MotorSetSpeed(1,  SPIN_SPEED);
+                        MotorSetSpeed(2, -SPIN_SPEED);
+                        MotorSetSpeed(3,  SPIN_SPEED);
+                        break;
+
+                    case 6:  // 右旋转 (左轮前转, 右轮后转)
+                        ESP_LOGI(TAG, "BLE → 右旋转");
+                        MotorSetSpeed(0,  SPIN_SPEED);
+                        MotorSetSpeed(1, -SPIN_SPEED);
+                        MotorSetSpeed(2,  SPIN_SPEED);
+                        MotorSetSpeed(3, -SPIN_SPEED);
+                        break;
+                }
             }
         }
     }
